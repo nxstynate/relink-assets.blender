@@ -1,8 +1,8 @@
 bl_info = {
-    "name": "Missing Assets Scanner",
-    "author": "Assistant",
-    "version": (1, 0),
-    "blender": (2, 80, 0),
+    "name": "Relink Assets",
+    "author": "NXSTYNATE",
+    "version": (0, 5, 0),
+    "blender": (4, 5, 0),
     "location": "View3D > N-Panel > Missing Assets",
     "description": "Scan for missing assets in the current file",
     "category": "Scene",
@@ -524,7 +524,7 @@ class MISSING_ASSETS_OT_relink(Operator):
 
 class MISSING_ASSETS_PT_panel(Panel):
     """Panel in the N-Panel for missing assets scanner"""
-    bl_label = "Missing Assets Scanner"
+    bl_label = "Relink Asssets"
     bl_idname = "MISSING_ASSETS_PT_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
