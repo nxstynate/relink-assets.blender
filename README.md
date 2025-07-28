@@ -1,5 +1,7 @@
 #  Blender Missing Assets Relinker 🕵️‍♂️
 
+![Screenshot 2025-07-26 123705.png](images/screenshot_ui.png)
+
 [![Blender Version](https://img.shields.io/badge/Blender-4.5%2B-orange.svg)](https://www.blender.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
