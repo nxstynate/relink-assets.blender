@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Missing Assets Scanner",
     "author": "Assistant",
-    "version": (0, 5, 0),
-    "blender": (4, 5, 0),
+    "version": (1, 0),
+    "blender": (2, 80, 0),
     "location": "View3D > N-Panel > Missing Assets",
     "description": "Scan for missing assets in the current file",
     "category": "Scene",
@@ -10,8 +10,10 @@ bl_info = {
 
 import bpy
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bpy.types import Panel, Operator, PropertyGroup
-from bpy.props import StringProperty, CollectionProperty
+from bpy.props import StringProperty, CollectionProperty, BoolProperty
 
 class MissingAssetItem(PropertyGroup):
     """Property group to store missing asset information"""
@@ -31,69 +33,76 @@ class MISSING_ASSETS_OT_scan(Operator):
         
         missing_count = 0
         
-        # Check for missing images
-        for img in bpy.data.images:
-            if img.source in {'FILE', 'SEQUENCE', 'MOVIE'}:
-                if not img.has_data:
+        # Check for missing images (with filter)
+        if context.scene.missing_assets_filter_images:
+            for img in bpy.data.images:
+                if img.source in {'FILE', 'SEQUENCE', 'MOVIE'}:
+                    if not img.has_data:
+                        item = context.scene.missing_assets_list.add()
+                        item.name = img.name
+                        item.type = "Image"
+                        item.path = img.filepath if img.filepath else "No path"
+                        missing_count += 1
+        
+        # Check for missing libraries (with filter)
+        if context.scene.missing_assets_filter_libraries:
+            for lib in bpy.data.libraries:
+                if not lib.filepath or not bpy.path.abspath(lib.filepath):
                     item = context.scene.missing_assets_list.add()
-                    item.name = img.name
-                    item.type = "Image"
-                    item.path = img.filepath if img.filepath else "No path"
+                    item.name = lib.name
+                    item.type = "Library"
+                    item.path = lib.filepath if lib.filepath else "No path"
                     missing_count += 1
         
-        # Check for missing libraries
-        for lib in bpy.data.libraries:
-            if not lib.filepath or not bpy.path.abspath(lib.filepath):
-                item = context.scene.missing_assets_list.add()
-                item.name = lib.name
-                item.type = "Library"
-                item.path = lib.filepath if lib.filepath else "No path"
-                missing_count += 1
-        
-        # Check for missing sound files
-        for sound in bpy.data.sounds:
-            if sound.filepath and not sound.packed_file:
-                try:
-                    # Try to access the sound data to check if file exists
-                    sound.filepath
-                except:
-                    item = context.scene.missing_assets_list.add()
-                    item.name = sound.name
-                    item.type = "Sound"
-                    item.path = sound.filepath if sound.filepath else "No path"
-                    missing_count += 1
-        
-        # Check for missing cache files
-        for obj in bpy.data.objects:
-            # Check modifiers
-            for mod in obj.modifiers:
-                # Mesh Cache modifier
-                if mod.type == 'MESH_CACHE' and mod.filepath:
+        # Check for missing sound files (with filter)
+        if context.scene.missing_assets_filter_sounds:
+            for sound in bpy.data.sounds:
+                if sound.filepath and not sound.packed_file:
                     try:
-                        with open(bpy.path.abspath(mod.filepath), 'r'):
-                            pass
+                        # Try to access the sound data to check if file exists
+                        sound.filepath
                     except:
                         item = context.scene.missing_assets_list.add()
-                        item.name = f"{obj.name} - {mod.name}"
-                        item.type = "Mesh Cache"
-                        item.path = mod.filepath
+                        item.name = sound.name
+                        item.type = "Sound"
+                        item.path = sound.filepath if sound.filepath else "No path"
                         missing_count += 1
-                
-                # Ocean modifier
-                elif mod.type == 'OCEAN' and mod.use_foam and mod.foam_layer_name:
-                    if mod.filepath:
+        
+        # Check for missing cache files (with filter)
+        if context.scene.missing_assets_filter_caches:
+            for obj in bpy.data.objects:
+                # Check modifiers
+                for mod in obj.modifiers:
+                    # Mesh Cache modifier
+                    if mod.type == 'MESH_CACHE' and mod.filepath:
                         try:
                             with open(bpy.path.abspath(mod.filepath), 'r'):
                                 pass
                         except:
                             item = context.scene.missing_assets_list.add()
                             item.name = f"{obj.name} - {mod.name}"
-                            item.type = "Ocean Cache"
+                            item.type = "Mesh Cache"
                             item.path = mod.filepath
                             missing_count += 1
+                    
+                    # Ocean modifier
+                    elif mod.type == 'OCEAN' and mod.use_foam and mod.foam_layer_name:
+                        if mod.filepath:
+                            try:
+                                with open(bpy.path.abspath(mod.filepath), 'r'):
+                                    pass
+                            except:
+                                item = context.scene.missing_assets_list.add()
+                                item.name = f"{obj.name} - {mod.name}"
+                                item.type = "Ocean Cache"
+                                item.path = mod.filepath
+                                missing_count += 1
         
         # Update the count
         context.scene.missing_assets_count = missing_count
+        
+        # Don't automatically expand the results
+        # context.scene.missing_assets_show_details = True  # Removed this line
         
         if missing_count == 0:
             self.report({'INFO'}, "No missing assets found!")
@@ -112,6 +121,131 @@ class MISSING_ASSETS_OT_clear_directory(Operator):
         context.scene.missing_assets_search_directory = ""
         return {'FINISHED'}
 
+class MISSING_ASSETS_OT_remove_missing(Operator):
+    """Remove references to missing assets"""
+    bl_idname = "missing_assets.remove_missing"
+    bl_label = "Remove Missing"
+    bl_description = "Remove references to missing assets (only images for safety)"
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+    
+    def execute(self, context):
+        removed_count = 0
+        
+        # Only remove missing images (safest option)
+        if context.scene.missing_assets_filter_images:
+            images_to_remove = []
+            for img in bpy.data.images:
+                if img.source in {'FILE', 'SEQUENCE', 'MOVIE'} and not img.has_data:
+                    images_to_remove.append(img)
+            
+            for img in images_to_remove:
+                bpy.data.images.remove(img)
+                removed_count += 1
+        
+        self.report({'INFO'}, f"Removed {removed_count} missing image references")
+        
+        # Update the scan
+        bpy.ops.missing_assets.scan()
+        
+        return {'FINISHED'}
+
+class MISSING_ASSETS_OT_export_report(Operator):
+    """Export a report of missing assets"""
+    bl_idname = "missing_assets.export_report"
+    bl_label = "Export Report"
+    bl_description = "Export a text report of all missing assets"
+    
+    filepath: StringProperty(
+        name="File Path",
+        description="Path to save the report",
+        default="missing_assets_report.txt",
+        subtype='FILE_PATH'
+    )
+    
+    filename_ext = ".txt"
+    
+    filter_glob: StringProperty(
+        default="*.txt;*.csv",
+        options={'HIDDEN'},
+        maxlen=255,
+    )
+    
+    file_format: bpy.props.EnumProperty(
+        name="File Format",
+        description="Choose the file format",
+        items=[
+            ('TXT', "Text (.txt)", "Export as text file"),
+            ('CSV', "CSV (.csv)", "Export as CSV file"),
+        ],
+        default='TXT',
+    )
+    
+    def invoke(self, context, event):
+        self.filepath = "missing_assets_report.txt"
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        # Ensure correct extension
+        if self.file_format == 'CSV':
+            if not self.filepath.endswith('.csv'):
+                self.filepath = os.path.splitext(self.filepath)[0] + '.csv'
+        else:
+            if not self.filepath.endswith('.txt'):
+                self.filepath = os.path.splitext(self.filepath)[0] + '.txt'
+        
+        try:
+            if self.file_format == 'CSV':
+                # Export as CSV
+                import csv
+                with open(self.filepath, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['Asset Type', 'Asset Name', 'File Path'])
+                    
+                    for item in context.scene.missing_assets_list:
+                        writer.writerow([item.type, item.name, item.path])
+                
+                self.report({'INFO'}, f"CSV report saved to {self.filepath}")
+            else:
+                # Export as TXT
+                with open(self.filepath, 'w') as f:
+                    f.write("Missing Assets Report\n")
+                    f.write("=" * 50 + "\n")
+                    f.write(f"Blend File: {bpy.data.filepath}\n")
+                    import datetime
+                    f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Total Missing Assets: {context.scene.missing_assets_count}\n")
+                    f.write("=" * 50 + "\n\n")
+                    
+                    # Group by type
+                    by_type = {}
+                    for item in context.scene.missing_assets_list:
+                        if item.type not in by_type:
+                            by_type[item.type] = []
+                        by_type[item.type].append(item)
+                    
+                    # Write each type
+                    for asset_type, items in by_type.items():
+                        f.write(f"\n{asset_type} ({len(items)} items):\n")
+                        f.write("-" * 30 + "\n")
+                        for item in items:
+                            f.write(f"  Name: {item.name}\n")
+                            f.write(f"  Path: {item.path}\n")
+                            f.write("\n")
+                
+                self.report({'INFO'}, f"Text report saved to {self.filepath}")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to save report: {str(e)}")
+        
+        return {'FINISHED'}
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "file_format")
+
 class MISSING_ASSETS_OT_relink(Operator):
     """Relink missing assets by searching in the specified directory"""
     bl_idname = "missing_assets.relink"
@@ -122,11 +256,50 @@ class MISSING_ASSETS_OT_relink(Operator):
     _current_item = 0
     _items_to_process = []
     _relinked_count = 0
+    _search_cache = {}
+    _search_complete = False
+    _executor = None
     
     @classmethod
     def poll(cls, context):
         # Always allow the operator to be called
         return True
+    
+    def build_file_cache(self, search_dir):
+        """Build a cache of all files in the search directory using parallel processing"""
+        file_cache = {}
+        
+        def scan_directory(root):
+            local_cache = {}
+            try:
+                for filename in os.listdir(root):
+                    filepath = os.path.join(root, filename)
+                    if os.path.isfile(filepath):
+                        # Store both exact and lowercase versions for case-insensitive matching
+                        local_cache[filename] = filepath
+                        local_cache[filename.lower()] = filepath
+            except Exception as e:
+                print(f"Error scanning {root}: {e}")
+            return local_cache
+        
+        # Get all subdirectories
+        all_dirs = [search_dir]
+        for root, dirs, files in os.walk(search_dir):
+            for d in dirs:
+                all_dirs.append(os.path.join(root, d))
+        
+        # Use ThreadPoolExecutor for parallel directory scanning
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+            future_to_dir = {executor.submit(scan_directory, d): d for d in all_dirs}
+            
+            for future in as_completed(future_to_dir):
+                try:
+                    result = future.result()
+                    file_cache.update(result)
+                except Exception as e:
+                    print(f"Error in parallel scan: {e}")
+        
+        return file_cache
     
     def modal(self, context, event):
         # Check if user wants to cancel
@@ -135,13 +308,26 @@ class MISSING_ASSETS_OT_relink(Operator):
             return {'CANCELLED'}
         
         if event.type == 'TIMER':
-            if self._current_item < len(self._items_to_process):
+            # Check if cache building is complete
+            if not self._search_complete and self._cache_future.done():
+                try:
+                    self._search_cache = self._cache_future.result()
+                    self._search_complete = True
+                    context.scene.missing_assets_status = "Searching for assets..."
+                    print(f"File cache built: {len(self._search_cache)} files found")
+                except Exception as e:
+                    self.report({'ERROR'}, f"Error building cache: {str(e)}")
+                    self.cancel(context)
+                    return {'CANCELLED'}
+            
+            # Process items only after cache is ready
+            if self._search_complete and self._current_item < len(self._items_to_process):
                 # Process one item
                 item = self._items_to_process[self._current_item]
                 context.scene.missing_assets_status = f"Searching for: {item['name']}"
                 
                 # Try to find and relink the asset
-                if self.relink_asset(context, item):
+                if self.relink_asset_fast(context, item):
                     self._relinked_count += 1
                 
                 self._current_item += 1
@@ -154,101 +340,84 @@ class MISSING_ASSETS_OT_relink(Operator):
                     area.tag_redraw()
                 
                 return {'RUNNING_MODAL'}
-            else:
+            elif self._search_complete:
                 # Finished processing
                 self.finish(context)
                 return {'FINISHED'}
+            else:
+                # Still building cache
+                return {'RUNNING_MODAL'}
         
         return {'PASS_THROUGH'}
     
-    def relink_asset(self, context, item):
-        """Try to relink a single asset"""
-        search_dir = context.scene.missing_assets_search_directory
-        if not search_dir or not os.path.exists(search_dir):
-            return False
-        
+    def relink_asset_fast(self, context, item):
+        """Fast relink using pre-built cache"""
         # Get the filename from the path
         filename = os.path.basename(item['path'])
         if not filename or filename == "No path":
             return False
         
-        # Search for the file in the directory and subdirectories
-        for root, dirs, files in os.walk(search_dir):
-            if filename in files:
-                new_path = os.path.join(root, filename)
-                
-                # Relink based on asset type
-                if item['type'] == "Image":
-                    for img in bpy.data.images:
-                        if img.name == item['name']:
-                            # Store old path for debugging
-                            old_path = img.filepath
-                            
-                            # Update the filepath
-                            img.filepath = new_path
-                            
-                            # Try multiple reload methods
-                            try:
-                                img.reload()
-                                # Force update
-                                img.update()
-                                
-                                # Verify the image now has data
-                                if img.has_data:
-                                    print(f"Successfully relinked: {item['name']}")
-                                    print(f"  Old path: {old_path}")
-                                    print(f"  New path: {new_path}")
-                                    return True
-                                else:
-                                    print(f"Failed to load data for: {item['name']}")
-                                    # Revert if unsuccessful
-                                    img.filepath = old_path
-                            except Exception as e:
-                                print(f"Error relinking {item['name']}: {str(e)}")
-                                img.filepath = old_path
-                            return False
-                
-                elif item['type'] == "Library":
-                    for lib in bpy.data.libraries:
-                        if lib.name == item['name']:
-                            old_path = lib.filepath
-                            lib.filepath = new_path
-                            try:
-                                lib.reload()
-                                print(f"Successfully relinked library: {item['name']}")
-                                return True
-                            except Exception as e:
-                                print(f"Error relinking library {item['name']}: {str(e)}")
-                                lib.filepath = old_path
-                            return False
-                
-                elif item['type'] == "Sound":
-                    for sound in bpy.data.sounds:
-                        if sound.name == item['name']:
-                            old_path = sound.filepath
-                            sound.filepath = new_path
-                            # Sounds don't have a reload method, but update the path
-                            sound.update_tag()
-                            print(f"Successfully relinked sound: {item['name']}")
-                            return True
-                
-                elif item['type'] == "Mesh Cache":
-                    # Extract object and modifier names
-                    obj_mod = item['name'].split(' - ')
-                    if len(obj_mod) == 2:
-                        obj_name, mod_name = obj_mod
-                        if obj_name in bpy.data.objects:
-                            obj = bpy.data.objects[obj_name]
-                            for mod in obj.modifiers:
-                                if mod.name == mod_name and mod.type == 'MESH_CACHE':
-                                    old_path = mod.filepath
-                                    mod.filepath = new_path
-                                    # Force modifier update
-                                    obj.update_tag()
-                                    print(f"Successfully relinked mesh cache: {item['name']}")
-                                    return True
+        # Try exact match first, then case-insensitive
+        new_path = self._search_cache.get(filename) or self._search_cache.get(filename.lower())
         
-        print(f"File not found for: {item['name']} (looking for: {filename})")
+        if not new_path:
+            print(f"File not found in cache: {filename}")
+            return False
+        
+        # Relink based on asset type
+        if item['type'] == "Image":
+            for img in bpy.data.images:
+                if img.name == item['name']:
+                    old_path = img.filepath
+                    img.filepath = new_path
+                    try:
+                        img.reload()
+                        img.update()
+                        if img.has_data:
+                            print(f"Successfully relinked: {item['name']}")
+                            return True
+                        else:
+                            img.filepath = old_path
+                    except Exception as e:
+                        print(f"Error relinking {item['name']}: {str(e)}")
+                        img.filepath = old_path
+                    return False
+        
+        elif item['type'] == "Library":
+            for lib in bpy.data.libraries:
+                if lib.name == item['name']:
+                    old_path = lib.filepath
+                    lib.filepath = new_path
+                    try:
+                        lib.reload()
+                        print(f"Successfully relinked library: {item['name']}")
+                        return True
+                    except Exception as e:
+                        print(f"Error relinking library {item['name']}: {str(e)}")
+                        lib.filepath = old_path
+                    return False
+        
+        elif item['type'] == "Sound":
+            for sound in bpy.data.sounds:
+                if sound.name == item['name']:
+                    sound.filepath = new_path
+                    sound.update_tag()
+                    print(f"Successfully relinked sound: {item['name']}")
+                    return True
+        
+        elif item['type'] == "Mesh Cache":
+            obj_mod = item['name'].split(' - ')
+            if len(obj_mod) == 2:
+                obj_name, mod_name = obj_mod
+                if obj_name in bpy.data.objects:
+                    obj = bpy.data.objects[obj_name]
+                    for mod in obj.modifiers:
+                        if mod.name == mod_name and mod.type == 'MESH_CACHE':
+                            mod.filepath = new_path
+                            obj.update_tag()
+                            print(f"Successfully relinked mesh cache: {item['name']}")
+                            return True
+        
         return False
     
     def execute(self, context):
@@ -258,11 +427,21 @@ class MISSING_ASSETS_OT_relink(Operator):
             return {'FINISHED'}
         
         # Clear status
-        context.scene.missing_assets_status = "Initializing..."
+        context.scene.missing_assets_status = "Building file cache..."
         
-        # Prepare list of items to process
+        # Prepare list of items to process with filters
         self._items_to_process = []
         for item in context.scene.missing_assets_list:
+            # Apply filters
+            if item.type == "Image" and not context.scene.missing_assets_filter_images:
+                continue
+            if item.type == "Library" and not context.scene.missing_assets_filter_libraries:
+                continue
+            if item.type == "Sound" and not context.scene.missing_assets_filter_sounds:
+                continue
+            if item.type in ["Mesh Cache", "Ocean Cache"] and not context.scene.missing_assets_filter_caches:
+                continue
+                
             self._items_to_process.append({
                 'name': item.name,
                 'type': item.type,
@@ -270,8 +449,8 @@ class MISSING_ASSETS_OT_relink(Operator):
             })
         
         if not self._items_to_process:
-            self.report({'INFO'}, "No missing assets to relink")
-            context.scene.missing_assets_status = "No missing assets to relink"
+            self.report({'INFO'}, "No missing assets to relink (check filters)")
+            context.scene.missing_assets_status = "No assets to relink"
             return {'FINISHED'}
         
         if not context.scene.missing_assets_search_directory:
@@ -287,6 +466,12 @@ class MISSING_ASSETS_OT_relink(Operator):
         # Reset counters
         self._current_item = 0
         self._relinked_count = 0
+        self._search_complete = False
+        
+        # Start building file cache in background
+        search_dir = context.scene.missing_assets_search_directory
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._cache_future = self._executor.submit(self.build_file_cache, search_dir)
         
         # Add timer
         wm = context.window_manager
@@ -304,13 +489,19 @@ class MISSING_ASSETS_OT_relink(Operator):
         context.scene.missing_assets_is_searching = False
         context.scene.missing_assets_continue_search = False
         context.scene.missing_assets_progress = 0.0
-        context.scene.missing_assets_progress = 0.0
         
         # Update status
         context.scene.missing_assets_status = f"Completed: Relinked {self._relinked_count} assets"
         
         # Report results
         self.report({'INFO'}, f"Relinked {self._relinked_count} assets")
+        
+        # Force UI update one more time
+        for area in context.screen.areas:
+            area.tag_redraw()
+        
+        # Force a scene update before rescanning
+        bpy.context.view_layer.update()
         
         # Automatically run scan to update the list
         bpy.ops.missing_assets.scan()
@@ -319,9 +510,14 @@ class MISSING_ASSETS_OT_relink(Operator):
         wm = context.window_manager
         wm.event_timer_remove(self._timer)
         
+        # Clean up executor
+        if self._executor:
+            self._executor.shutdown(wait=False)
+        
         # Clear searching flags
         context.scene.missing_assets_is_searching = False
         context.scene.missing_assets_continue_search = False
+        context.scene.missing_assets_progress = 0.0
         
         context.scene.missing_assets_status = f"Stopped: Relinked {self._relinked_count} assets"
         self.report({'INFO'}, f"Search stopped. Relinked {self._relinked_count} assets before stopping.")
@@ -347,6 +543,20 @@ class MISSING_ASSETS_PT_panel(Panel):
         row = box.row(align=True)
         row.prop(scene, "missing_assets_search_directory", text="")
         row.operator("missing_assets.clear_directory", text="", icon='X', emboss=True)
+        
+        layout.separator()
+        
+        # Filter options box
+        filter_box = layout.box()
+        filter_box.label(text="Filter Options:", icon='FILTER')
+        
+        row = filter_box.row(align=True)
+        row.prop(scene, "missing_assets_filter_images", text="Images")
+        row.prop(scene, "missing_assets_filter_libraries", text="Libraries")
+        
+        row = filter_box.row(align=True)
+        row.prop(scene, "missing_assets_filter_sounds", text="Sounds")
+        row.prop(scene, "missing_assets_filter_caches", text="Caches")
         
         layout.separator()
         
@@ -426,12 +636,24 @@ class MISSING_ASSETS_PT_panel(Panel):
             row.label(text="Status:", icon='INFO')
             row = status_box.row()
             row.label(text=scene.missing_assets_status)
+        
+        # Batch operations box
+        layout.separator()
+        
+        batch_box = layout.box()
+        batch_box.label(text="Batch Operations:", icon='MODIFIER')
+        
+        row = batch_box.row(align=True)
+        row.operator("missing_assets.remove_missing", icon='X')
+        row.operator("missing_assets.export_report", icon='TEXT')
 
 # Registration
 classes = [
     MissingAssetItem,
     MISSING_ASSETS_OT_scan,
     MISSING_ASSETS_OT_clear_directory,
+    MISSING_ASSETS_OT_remove_missing,
+    MISSING_ASSETS_OT_export_report,
     MISSING_ASSETS_OT_relink,
     MISSING_ASSETS_PT_panel,
 ]
@@ -471,10 +693,32 @@ def register():
     )
     bpy.types.Scene.missing_assets_progress = bpy.props.FloatProperty(
         name="Progress",
-        description="Search progress (0.0 to 1.0)",
+        description="Search progress from 0.0 to 1.0",
         default=0.0,
         min=0.0,
         max=1.0
+    )
+    
+    # Filter properties
+    bpy.types.Scene.missing_assets_filter_images = BoolProperty(
+        name="Images",
+        description="Include images in scan and relink",
+        default=True
+    )
+    bpy.types.Scene.missing_assets_filter_libraries = BoolProperty(
+        name="Libraries",
+        description="Include libraries in scan and relink",
+        default=True
+    )
+    bpy.types.Scene.missing_assets_filter_sounds = BoolProperty(
+        name="Sounds",
+        description="Include sounds in scan and relink",
+        default=True
+    )
+    bpy.types.Scene.missing_assets_filter_caches = BoolProperty(
+        name="Caches",
+        description="Include cache files in scan and relink",
+        default=True
     )
 
 def unregister():
@@ -490,6 +734,12 @@ def unregister():
     del bpy.types.Scene.missing_assets_is_searching
     del bpy.types.Scene.missing_assets_continue_search
     del bpy.types.Scene.missing_assets_progress
+    
+    # Remove filter properties
+    del bpy.types.Scene.missing_assets_filter_images
+    del bpy.types.Scene.missing_assets_filter_libraries
+    del bpy.types.Scene.missing_assets_filter_sounds
+    del bpy.types.Scene.missing_assets_filter_caches
 
 if __name__ == "__main__":
     register()
