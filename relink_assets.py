@@ -3,7 +3,7 @@ bl_info = {
     "author": "NXSTYNATE",
     "version": (0, 5, 0),
     "blender": (4, 5, 0),
-    "location": "View3D > N-Panel > Missing Assets",
+    "location": "View3D > N-Panel > Relink Assets",
     "description": "Scan for missing assets in the current file",
     "category": "Scene",
 }
@@ -528,7 +528,7 @@ class MISSING_ASSETS_PT_panel(Panel):
     bl_idname = "MISSING_ASSETS_PT_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Missing Assets"
+    bl_category = "Relink Assets"
     
     def draw(self, context):
         layout = self.layout
